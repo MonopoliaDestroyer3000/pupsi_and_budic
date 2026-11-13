@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import hashlib
+import getpass
 import json
 import os
 from pathlib import Path
@@ -121,7 +122,15 @@ def _grade(task: Path, label: dict, test_hashes: dict, tasks_root: Path, scratch
 
 
 def benchmark(source: Path, budget: float = 100000, timeout: float = 300, use_framework: bool = False,
-              container_image: str | None = None) -> dict:
+              container_image: str | None = None, *, live: bool = False, base_url: str | None = None,
+              api_key: str | None = None, model: str = 'qwen3.6-35b-a3b-noreason') -> dict:
+    if live and container_image:
+        raise ValueError('Live mode runs locally; --docker-image is for isolated offline evaluation')
+    if live:
+        base_url = base_url or os.environ.get('LLM_BASE_URL')
+        api_key = api_key or os.environ.get('LLM_API_KEY')
+        if not base_url or not api_key:
+            raise ValueError('Live mode requires a proxy URL and API key')
     source = source.resolve()
     labels, provenance = _labels(source)
     if not labels:
@@ -156,11 +165,16 @@ def benchmark(source: Path, budget: float = 100000, timeout: float = 300, use_fr
             command = [sys.executable, str(REPO / "run_agent.py"), "--tasks-dir", str(target),
                        "--output-file", str(checkpoint), "--deterministic-only", "--budget", str(budget),
                        "--time-limit", duration]
-            if not use_framework:
+            if live:
+                command.remove('--deterministic-only')
+                command.extend(['--model',model,'--reasoning-model',model,'--concurrency','1'])
+            elif not use_framework:
                 command.append("--without-framework")
         env = os.environ.copy()
         for key in ("LLM_BASE_URL", "LLM_API_KEY", "OUT", "TASKS"):
             env.pop(key, None)
+        if live:
+            env['LLM_BASE_URL'], env['LLM_API_KEY'] = base_url, api_key
         started = time.monotonic()
         timed_out = False
         try:
@@ -207,12 +221,22 @@ def benchmark(source: Path, budget: float = 100000, timeout: float = 300, use_fr
         mode = (f"deterministic-only, Docker image {container_image}, openJiuwen" if container_image else
                 "deterministic-only, actual entrypoint, " + ("openJiuwen" if use_framework else "without-framework"))
         report = {"schema": 1, "evaluated_at_utc": datetime.now(timezone.utc).isoformat(),
-                "mode": mode,
+                "mode": f'live proxy, openJiuwen, {model}' if live else mode,
                 "label_isolation": "Oracle and evaluation fields were removed from all harness task inputs.",
                 "provenance": provenance, "summary": summary, "per_type": per_type,
                 "harness_stderr": stderr, "tasks": rows}
         if container_image:
             report["container_image"] = container_image
+        if live:
+            report['events'] = checkpoint_data.get('events', [])
+            report['model'] = model
+            # Defense in depth for unexpected downstream exception text.
+            def redact(value):
+                if isinstance(value,str): return value.replace(api_key,'[REDACTED]')
+                if isinstance(value,list): return [redact(item) for item in value]
+                if isinstance(value,dict): return {k:redact(v) for k,v in value.items()}
+                return value
+            report = redact(report)
         return report
 
 
@@ -224,13 +248,28 @@ def main(argv=None) -> int:
     parser.add_argument("--count", type=int, default=100)
     parser.add_argument("--seed", type=int, default=20261113)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--budget", type=float, default=100000)
+    parser.add_argument("--budget", type=float, default=None)
     parser.add_argument("--timeout", type=float, default=300)
     parser.add_argument("--with-framework", action="store_true")
     parser.add_argument("--docker-image", help="Run a built image with judge restrictions and independently grade answers")
+    parser.add_argument('--live', action='store_true', help='Use the actual proxy and openJiuwen; prompts for the key if absent')
+    parser.add_argument('--base-url', default=os.environ.get('LLM_BASE_URL','https://api.neuraldeep.ru/v1'))
+    parser.add_argument('--model', choices=('qwen3.8-27b-noreason','qwen3.6-35b-a3b-noreason','qwen3.8-27b','qwen3.6-35b-a3b'), default='qwen3.6-35b-a3b-noreason')
     args = parser.parse_args(argv)
     if sum((args.synthetic, args.hard, bool(args.tasks_dir))) != 1:
         parser.error("Specify exactly one of --tasks-dir, --synthetic or --hard")
+    if args.live and args.docker_image:
+        parser.error('--live cannot be combined with --docker-image')
+    budget = args.budget if args.budget is not None else (3000 if args.live else 100000)
+    import math
+    if not math.isfinite(budget) or budget < 0: parser.error('Budget must be finite and nonnegative')
+    options = {}
+    if args.live:
+        key = os.environ.get('LLM_API_KEY') or getpass.getpass('API key (hidden input): ').strip()
+        if not key or any(ord(c)<33 or ord(c)>126 for c in key):
+            parser.error('Key contains invalid characters; copy only the API key')
+        options = dict(live=True,base_url=args.base_url,api_key=key,model=args.model)
+        print(f'LIVE: budget {budget}, model {args.model}; the API key is not saved.',flush=True)
     if args.synthetic or args.hard:
         sys.path.insert(0, str(REPO))
         if args.hard:
@@ -240,12 +279,16 @@ def main(argv=None) -> int:
         with tempfile.TemporaryDirectory(prefix="jiuwen-synthetic-") as temp_name:
             dataset = Path(temp_name) / "dataset"
             generate(dataset, args.count, args.seed)
-            report = benchmark(dataset, args.budget, args.timeout, args.with_framework, args.docker_image)
+            report = benchmark(dataset, budget, args.timeout, args.with_framework, args.docker_image, **options)
     else:
-        report = benchmark(args.tasks_dir, args.budget, args.timeout, args.with_framework, args.docker_image)
+        report = benchmark(args.tasks_dir, budget, args.timeout, args.with_framework, args.docker_image, **options)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report["summary"], ensure_ascii=False, indent=2))
+    if args.live:
+        print('Report saved:',args.output.resolve())
+        for event in [e for e in report.get('events',[]) if e.get('status')=='attempt_failed'][:3]:
+            print('Attempt:',event.get('task_id'),event.get('evidence'))
     return 0 if report["summary"]["harness_exit_code"] == 0 else 1
 
 

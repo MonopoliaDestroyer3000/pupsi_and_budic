@@ -17,7 +17,6 @@ from .deterministic import solve
 from .llm import Proxy, ProxyError
 from .planner import Planner
 from .tools import LocalTools, atomic_write, inventory
-from .specs import evaluate, system_prompt
 
 LOG = logging.getLogger("budget_agent")
 
@@ -30,7 +29,6 @@ Actions (choose exactly one):
 {"tool":"grep","text":"literal substring"}
 {"tool":"python","code":"import csv\\nprint(...)"}
 {"tool":"write","path":"mylib.py","content":"complete corrected file"}
-{"tool":"patch","path":"mylib.py","content":"only changed function definitions, or a class containing changed methods"}
 {"tool":"test"}
 {"tool":"answer","answer":"exact final value only"}
 {"tool":"skip","reason":"missing required information or contradictory requirements"}
@@ -38,7 +36,6 @@ The python tool supports only read-only files and standard libraries math,csv,js
 collections,decimal,fractions,itertools,functools,datetime,heapq,bisect,operator,string,io.
 Use Python for arithmetic or CSV aggregation; print the answer and then submit it. Search files for
 evidence; follow employer/mentor links as needed. For coding, read tests, repair source, run tests,
-Prefer patch over write: return only changed existing functions or methods; unrelated code is preserved.
 submit DONE only when the full unchanged suite passes. A failed or unsupported tool does not prove
 the task impossible. Submit promptly when verified. Do not include answer.txt writes in code.
 """
@@ -56,9 +53,6 @@ class Task:
     attempts: int = 0
     missing_evidence: bool = False
     evidence: str = ""
-    prompt_bytes: int = 0
-    expected_output: float = 0
-    expected_calls: float = 0
 
 
 def discover(root: Path) -> list[Task]:
@@ -142,7 +136,7 @@ class Harness:
         self.results = {}
         self.events = []
         self.lock = threading.Lock()
-        self.proxy = Proxy(base_url, api_key, self.budget, deadline=self.deadline) if base_url and api_key and not deterministic_only else None
+        self.proxy = Proxy(base_url, api_key, self.budget) if base_url and api_key and not deterministic_only else None
 
     def snapshot(self) -> dict:
         return {"tasks": len(self.tasks), "submitted": len(self.results),
@@ -194,28 +188,14 @@ class Harness:
             LOG.warning("Local solve failed for %s: %s", task.task_id, task.evidence)
         return False
 
-    def messages(self, task: Task, tools: LocalTools) -> list:
-        initial = "TASK: " + task.instruction + "\n" + tools.context(task.instruction, task.kind)
-        if task.evidence:
-            initial += "\nLocal inspection: " + task.evidence[-1800:]
-        return [{"role": "system", "content": system_prompt(task.kind, SYSTEM)}, {"role": "user", "content": initial}]
-
-    def profile(self, task: Task):
-        tools = LocalTools(task.workspace)
-        task.prompt_bytes = len(json.dumps(self.messages(task, tools), ensure_ascii=False).encode('utf-8'))
-        if task.kind == 'coding':
-            sources = [p for p in inventory(task.workspace) if p.suffix == '.py' and not p.name.startswith('test')]
-            task.expected_output = min(1800, 120 + max((p.stat().st_size for p in sources), default=1000) / 12)
-            task.expected_calls = 2.5
-        else:
-            task.expected_output = {'math':80,'search':100,'data_analysis':180}.get(task.kind,350)
-            task.expected_calls = 1.5
-
     def solve_llm(self, task: Task, allowance: float) -> tuple[bool, float, str]:
         if self.proxy is None:
             return False, 0, "Proxy credentials unavailable"
         tools = LocalTools(task.workspace, max_seconds=min(10, max(.1, self.deadline - time.monotonic())))
-        messages = self.messages(task, tools)
+        initial = "TASK: " + task.instruction + "\n" + tools.context(task.instruction, task.kind)
+        if task.evidence:
+            initial += "\nLocal inspection: " + task.evidence[-1800:]
+        messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": initial}]
         used, repeated, last_action, last_test = 0.0, 0, "", False
         reason = "Step limit reached"
         try:
@@ -251,20 +231,11 @@ class Harness:
                         answer = "DONE"
                     self.submit(task, answer, "llm", "Validated unchanged tests" if task.kind == "coding" else "Model submission with local tools", used)
                     return True, used, "Submitted"
-                if action['tool'] == 'spec':
-                    try:
-                        answer = evaluate(task.kind, action, task.workspace, task.instruction)
-                    except (ValueError, KeyError, TypeError, OSError, ArithmeticError, SyntaxError) as exc:
-                        observation = f'Plan rejected: {type(exc).__name__}: {str(exc)[:300]}. Use file or Python tools to investigate.'
-                    else:
-                        self.submit(task, answer, 'structured', 'Plan evaluated against workspace data with exact arithmetic', used)
-                        return True, used, 'Submitted'
-                else:
-                    observation = tools.execute(action)
+                observation = tools.execute(action)
                 self.event(task, "llm_step", json.dumps({"step": step + 1, "model": model,
                            "tool": action["tool"], "path": action.get("path"),
                            "observation": observation[:600]}, ensure_ascii=False), cost)
-                if action["tool"] in {"write", "patch"}:
+                if action["tool"] == "write":
                     last_test = False
                 if action["tool"] == "test":
                     last_test = observation.startswith("PASS\n")
@@ -299,10 +270,6 @@ class Harness:
                 if unavailable_evidence(task):
                     self.event(task, "missing_required_data", task.evidence)
                 else:
-                    try:
-                        self.profile(task)
-                    except (OSError, ValueError):
-                        task.prompt_bytes = 0
                     pending.append(task)
         if self.proxy is None or self.deterministic_only:
             for task in pending:
