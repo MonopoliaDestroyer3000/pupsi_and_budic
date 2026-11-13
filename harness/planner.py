@@ -16,9 +16,14 @@ class Planner:
 
     def estimate(self, task) -> tuple[float, float]:
         cost, probability = self.PRIORS.get(task.kind, (2400, .55))
+        if task.prompt_bytes:
+            # Expected input, unlike the conservative transport reservation, is
+            # calibrated at four UTF-8 bytes per token. Output and calls vary by route.
+            cost = (task.prompt_bytes / 40 + task.expected_output) * task.expected_calls
         # Broad size signal; do not read labels or request a paid planning call.
         size_factor = min(2.0, 1 + task.file_bytes / 120000 + len(task.instruction) / 10000)
-        cost *= size_factor
+        if not task.prompt_bytes:
+            cost *= size_factor
         with self._lock:
             samples = list(self.observations[task.kind])
         if samples:

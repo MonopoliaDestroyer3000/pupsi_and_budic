@@ -220,6 +220,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tasks-dir", type=Path)
     parser.add_argument("--synthetic", action="store_true", help="Generate a fresh temporary synthetic dataset")
+    parser.add_argument("--hard", action="store_true", help="Independent harder fixtures including hidden coding contracts")
     parser.add_argument("--count", type=int, default=100)
     parser.add_argument("--seed", type=int, default=20261113)
     parser.add_argument("--output", type=Path, required=True)
@@ -228,11 +229,14 @@ def main(argv=None) -> int:
     parser.add_argument("--with-framework", action="store_true")
     parser.add_argument("--docker-image", help="Run a built image with judge restrictions and independently grade answers")
     args = parser.parse_args(argv)
-    if args.synthetic == bool(args.tasks_dir):
-        parser.error("Specify exactly one of --tasks-dir or --synthetic")
-    if args.synthetic:
+    if sum((args.synthetic, args.hard, bool(args.tasks_dir))) != 1:
+        parser.error("Specify exactly one of --tasks-dir, --synthetic or --hard")
+    if args.synthetic or args.hard:
         sys.path.insert(0, str(REPO))
-        from tools.generate_training import generate
+        if args.hard:
+            from tools.hard_cases import generate
+        else:
+            from tools.generate_training import generate
         with tempfile.TemporaryDirectory(prefix="jiuwen-synthetic-") as temp_name:
             dataset = Path(temp_name) / "dataset"
             generate(dataset, args.count, args.seed)

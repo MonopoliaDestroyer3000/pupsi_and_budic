@@ -153,6 +153,12 @@ class LocalTools:
                             if len(found) >= 50:
                                 return "\n".join(found)[:12000]
                 return "\n".join(found)[:12000] or "No matches"
+            if tool == "patch":
+                from .patches import merge
+                path = safe_path(self.root, str(action['path']), writable=True)
+                if path.suffix != '.py': raise ValueError('Patches require a Python module')
+                content = merge(path.read_text(encoding='utf-8'), str(action['content']))
+                return self.execute({'tool':'write', 'path':action['path'], 'content':content})
             if tool == "write":
                 path = safe_path(self.root, str(action["path"]), writable=True)
                 content = str(action["content"])

@@ -11,14 +11,29 @@ jobs:
           python-version: '3.12.10'
       - run: python -m unittest discover -s tests -v
       - run: python tools/benchmark.py --synthetic --count 100 --seed 74 --output .work/ci-benchmark.json
+      - name: Independent harder fixtures
+        run: |
+          python tools/benchmark.py --hard --count 100 --seed 89 --output .work/hard-evaluation.json
+          python -c "import json; r=json.load(open('.work/hard-evaluation.json'))['summary']; assert r['correct']>=10 and r['wrong_submissions']==0 and r['impossible_abstained']==20, r"
       - run: docker build -t hack:latest .
       - name: Verify image size
         run: |
           python -c "import json,subprocess; image=json.loads(subprocess.check_output(['docker','image','inspect','hack:latest']))[0]; size=image['Size']; print(f'Image size: {size} bytes'); assert size < 4_000_000_000"
+      - name: Test model routes inside the container
+        run: |
+          docker run --rm --network none --read-only --tmpfs /tmp:rw,size=2g \
+            --cap-drop ALL --security-opt no-new-privileges --cpus 4 --memory 16g \
+            --pids-limit 512 -e HOME=/tmp -e PYTHONPATH=/app:/checks \
+            -v "$PWD/tests:/checks/tests:ro" -v "$PWD/tools:/checks/tools:ro" \
+            --entrypoint python hack:latest -B -m unittest discover -s /checks/tests -v
       - name: Grade container answers with the judge filesystem restrictions
         run: |
           python tools/benchmark.py --synthetic --count 100 --seed 75 --budget 7000 --docker-image hack:latest --output .work/container-evaluation.json
           python -c "import json; r=json.load(open('.work/container-evaluation.json'))['summary']; assert r['correct']==80 and r['impossible_abstained']==20 and r['wrong_submissions']==0 and r['budget']['spent']==0, r"
+      - name: Hard fixtures inside the container
+        run: |
+          python tools/benchmark.py --hard --count 100 --seed 89 --budget 7000 --docker-image hack:latest --output .work/container-hard-evaluation.json
+          python -c "import json; r=json.load(open('.work/container-hard-evaluation.json'))['summary']; assert r['correct']>=10 and r['wrong_submissions']==0 and r['impossible_abstained']==20, r"
       - run: docker images --format '{{.Repository}}:{{.Tag}} -> {{.Size}}'
         if: always()
       - name: Test reports
