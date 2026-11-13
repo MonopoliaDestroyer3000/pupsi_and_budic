@@ -1,0 +1,15 @@
+.git
+.venv
+.framework*
+.work
+__pycache__
+**/__pycache__
+task-dir
+__MACOSX
+*.zip
+.env
+.env.*
+results
+tests
+tools
+*.md
