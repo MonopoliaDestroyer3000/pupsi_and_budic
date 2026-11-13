@@ -1,15 +1,14 @@
 __pycache__/
 *.py[cod]
 .venv/
-.framework*/
 .work/
 .pytest_cache/
 .env
 .env.*
 !.env.example
 task-dir/
-__MACOSX/
+results/
+.DS_Store
 *.zip
 *.log
 logs/
-Регламент соревнования.md

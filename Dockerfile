@@ -10,13 +10,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 COPY requirements.txt /app/requirements.txt
-# Install the pinned, tested import closure rather than unused framework
-# integrations. In particular, no local model packages or weights are needed.
+# Pinned runtime dependencies for BaseAgent and Runner.
 RUN python -m pip install --no-cache-dir --only-binary=:all: --no-deps -r requirements.txt
 
 COPY run_agent.py /app/run_agent.py
 COPY harness /app/harness
-# Fail the build if the framework, its session lifecycle or any import is broken.
+# Framework invocation check.
 RUN python -c "import asyncio; from harness.jiuwen import invoke_harness; assert asyncio.run(invoke_harness(lambda x: x, {'smoke': True})) == {'smoke': True}"
 
 ENTRYPOINT ["python", "/app/run_agent.py"]

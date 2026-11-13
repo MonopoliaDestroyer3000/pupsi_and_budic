@@ -1,6 +1,5 @@
 .git
 .venv
-.framework*
 .work
 __pycache__
 **/__pycache__

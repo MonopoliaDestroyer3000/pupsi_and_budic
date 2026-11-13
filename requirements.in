@@ -1,6 +1,5 @@
-# Import closure for the custom BaseAgent and Runner used by this harness.
-# Compile without openjiuwen (its optional integrations pull unrelated SDKs).
-# Add openjiuwen==0.1.19 to requirements.txt, install it with --no-deps.
+# Dependency import closure for BaseAgent and Runner.
+# openjiuwen is pinned separately in requirements.txt.
 aiofiles==25.1.0
 aiohttp==3.14.5
 alembic==1.20.1

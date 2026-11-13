@@ -146,6 +146,28 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(budget.spent, raised.exception.cost)
         self.assertEqual(budget.reserved, 0)
 
+    def test_http_400_detail_explains_validation_without_key(self):
+        proxy, budget = self.proxy()
+        body = json.dumps({'error': {'message': 'Invalid parameter max_tokens; key private-test-key'}}).encode()
+        error = urllib.error.HTTPError(proxy.url, 400, 'Bad Request', {}, io.BytesIO(body))
+        with patch('harness.llm.urllib.request.build_opener') as build:
+            build.return_value.open.side_effect = error
+            with self.assertRaises(ProxyError) as raised:
+                proxy.complete([], ALLOWED_MODELS[0], 300, 1000)
+        self.assertIn('Invalid parameter max_tokens', raised.exception.detail)
+        self.assertNotIn('private-test-key', raised.exception.detail)
+        self.assertGreater(budget.spent, 0)
+        self.assertEqual(budget.reserved, 0)
+
+    def test_html_error_is_readable_without_markup_or_key(self):
+        from harness.llm import error_detail
+        error = urllib.error.HTTPError('https://example.invalid', 400, '', {},
+            io.BytesIO(b'<html><h1>400 Bad Request</h1><p>Invalid header private-test-key</p></html>'))
+        detail = error_detail(error, 'private-test-key')
+        self.assertIn('Invalid header', detail)
+        self.assertNotIn('<html>', detail)
+        self.assertNotIn('private-test-key', detail)
+
     def test_unusable_completion_shapes_still_settle_and_raise_proxy_error(self):
         for result in ([], {}, {"choices": []}, {"choices": [{"message": []}]}):
             with self.subTest(result=result):

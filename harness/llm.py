@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import html
+import re
 import urllib.error
 import urllib.request
 
@@ -12,9 +14,35 @@ ALLOWED_MODELS = ("qwen3.8-27b-noreason", "qwen3.6-35b-a3b-noreason",
 
 
 class ProxyError(RuntimeError):
-    def __init__(self, message: str, cost: float = 0):
+    def __init__(self, message: str, cost: float = 0, detail: str = ""):
         super().__init__(message)
         self.cost = cost
+        self.detail = detail
+
+
+def error_detail(error, key: str) -> str:
+    """Expose bounded error text, stripping markup and credentials."""
+    raw = b""
+    try:
+        raw = error.read(16384)
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            return "Server returned an unrecognized error format."
+        value = payload.get("error", payload.get("detail", ""))
+        if isinstance(value, dict):
+            value = value.get("message", value.get("code", ""))
+        text = str(value) if value else "No error description returned."
+    except Exception:
+        text = raw.decode('utf-8', errors='replace')
+        text = re.sub(r'(?is)<(script|style)\b[^>]*>.*?</\1>', ' ', text)
+        text = html.unescape(re.sub(r'<[^>]+>', ' ', text))
+        text = 'Non-JSON response: ' + (text.strip() or '[empty body]')
+    if key:
+        text = text.replace(key, "[REDACTED]")
+    text = re.sub(r"(?i)bearer\s+\S+", "Bearer [REDACTED]", text)
+    text = re.sub(r"(?:sk-|NGU26-)[A-Za-z0-9_.-]+", "[REDACTED]", text)
+    text = re.sub(r"(?i)(Key Hash\s*\(Token\)\s*=\s*)[a-f0-9]+", r"\1[REDACTED]", text)
+    return " ".join(text.split())[:1000]
 
 
 class Proxy:
@@ -49,7 +77,7 @@ class Proxy:
             result = json.loads(raw)
         except urllib.error.HTTPError as exc:
             cost = self.budget.settle(reservation, None)
-            raise ProxyError(f"Proxy HTTP {exc.code}", cost) from None
+            raise ProxyError(f"Proxy HTTP {exc.code}", cost, error_detail(exc, self.key)) from None
         except Exception as exc:
             cost = self.budget.settle(reservation, None)
             raise ProxyError(f"Proxy request failed ({type(exc).__name__})", cost) from None

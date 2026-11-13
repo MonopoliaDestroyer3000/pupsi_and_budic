@@ -1,14 +1,10 @@
-"""Run the competition scheduler as a real openJiuwen custom agent.
-
-The framework owns invocation, callbacks and session lifecycle; the synchronous
-callback owns admission control, tools, persistence and the shared token ledger.
-No framework model client is created, so every paid call uses the one budgeted
-proxy client in the harness.
-"""
+"""openJiuwen agent integration for the budget-aware scheduler."""
 
 from __future__ import annotations
 
 import asyncio
+import tempfile
+from pathlib import Path
 from collections.abc import Callable
 from typing import Any
 
@@ -22,6 +18,8 @@ def _agent_class():
         {
             "backend": "default",
             "level": "WARNING",
+            # The path is validated even when file sinks are disabled.
+            "log_path": str(Path(tempfile.gettempdir()) / "openjiuwen-harness-logs"),
             "output": ["console"],
             "interface_output": ["console"],
             "performance_output": ["console"],
