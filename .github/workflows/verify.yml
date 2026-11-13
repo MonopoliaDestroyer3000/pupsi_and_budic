@@ -12,14 +12,19 @@ jobs:
       - run: python -m unittest discover -s tests -v
       - run: python tools/benchmark.py --synthetic --count 100 --seed 74 --output .work/ci-benchmark.json
       - run: docker build -t hack:latest .
-      - run: python tools/generate_training.py --output .work/container-tasks --count 100 --seed 75
-      - name: Run with the judge filesystem restrictions
+      - name: Verify image size
         run: |
-          docker run --rm --network none --read-only --tmpfs /tmp:rw,size=2g \
-            --cap-drop ALL --security-opt no-new-privileges --cpus 4 --memory 16g \
-            --pids-limit 512 -e HOME=/tmp -e BUDGET=7000 \
-            -v "$PWD/.work/container-tasks:/data/tasks:rw" \
-            --workdir /app --entrypoint python hack:latest \
-            /app/run_agent.py --tasks-dir /data/tasks > .work/container-result.json
-          python -c "import json; r=json.load(open('.work/container-result.json')); assert r['submitted']==80; assert r['budget']['spent']==0, r"
+          python -c "import json,subprocess; image=json.loads(subprocess.check_output(['docker','image','inspect','hack:latest']))[0]; size=image['Size']; print(f'Image size: {size} bytes'); assert size < 4_000_000_000"
+      - name: Grade container answers with the judge filesystem restrictions
+        run: |
+          python tools/benchmark.py --synthetic --count 100 --seed 75 --budget 7000 --docker-image hack:latest --output .work/container-evaluation.json
+          python -c "import json; r=json.load(open('.work/container-evaluation.json'))['summary']; assert r['correct']==80 and r['impossible_abstained']==20 and r['wrong_submissions']==0 and r['budget']['spent']==0, r"
       - run: docker images --format '{{.Repository}}:{{.Tag}} -> {{.Size}}'
+        if: always()
+      - name: Test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-reports
+          path: .work/*.json
+          include-hidden-files: true

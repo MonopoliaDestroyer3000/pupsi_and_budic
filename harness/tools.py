@@ -18,6 +18,8 @@ def atomic_write(path: Path, text: str) -> None:
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
+        # The evaluator may read bind-mounted answers under a different UID.
+        os.chmod(temporary, 0o644)
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):

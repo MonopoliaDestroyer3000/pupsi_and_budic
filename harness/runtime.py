@@ -184,7 +184,8 @@ class Harness:
                 self.submit(task, answer, "deterministic", evidence)
                 return True
         except Exception as exc:
-            task.evidence = f"Fast-path exception: {type(exc).__name__}"
+            task.evidence = f"Fast-path exception: {type(exc).__name__}: {str(exc)[:300]}"
+            LOG.warning("Local solve failed for %s: %s", task.task_id, task.evidence)
         return False
 
     def solve_llm(self, task: Task, allowance: float) -> tuple[bool, float, str]:

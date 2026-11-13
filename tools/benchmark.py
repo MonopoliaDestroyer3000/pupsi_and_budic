@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -119,7 +120,8 @@ def _grade(task: Path, label: dict, test_hashes: dict, tasks_root: Path, scratch
     return valid, "Exact expected answer matched" if valid else f"Expected {expected!r}, received {answer!r}", True
 
 
-def benchmark(source: Path, budget: float = 100000, timeout: float = 300, use_framework: bool = False) -> dict:
+def benchmark(source: Path, budget: float = 100000, timeout: float = 300, use_framework: bool = False,
+              container_image: str | None = None) -> dict:
     source = source.resolve()
     labels, provenance = _labels(source)
     if not labels:
@@ -128,12 +130,34 @@ def benchmark(source: Path, budget: float = 100000, timeout: float = 300, use_fr
         scratch = Path(temp_name).resolve()
         target = scratch / "tasks"
         test_hashes = _copy_inputs(source, target)
-        checkpoint = scratch / "checkpoint.json"
-        command = [sys.executable, str(REPO / "run_agent.py"), "--tasks-dir", str(target),
-                   "--output-file", str(checkpoint), "--deterministic-only", "--budget", str(budget),
-                   "--time-limit", str(max(1, min(timeout - 5, 3450)))]
-        if not use_framework:
-            command.append("--without-framework")
+        duration = str(max(1, min(timeout - 5, 3450)))
+        container_name = None
+        if container_image:
+            # The mount must remain writable after --cap-drop ALL, even when
+            # the host and container use different UIDs. Only sanitized copies
+            # in this temporary directory have their permissions changed.
+            target.chmod(0o777)
+            for path in target.rglob("*"):
+                path.chmod(0o777 if path.is_dir() else 0o666)
+            checkpoint = target / "checkpoint.json"
+            container_name = "jiuwen-benchmark-" + uuid.uuid4().hex[:12]
+            command = ["docker", "run", "--rm", "--name", container_name,
+                       "--network", "none", "--read-only", "--tmpfs", "/tmp:rw,size=2g",
+                       "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+                       "--cpus", "4", "--memory", "16g", "--pids-limit", "512",
+                       "-e", "HOME=/tmp", "-e", f"BUDGET={budget}",
+                       "-v", f"{target}:/data/tasks:rw", "--workdir", "/app",
+                       "--entrypoint", "python", container_image,
+                       "/app/run_agent.py", "--tasks-dir", "/data/tasks",
+                       "--output-file", "/data/tasks/checkpoint.json",
+                       "--deterministic-only", "--time-limit", duration]
+        else:
+            checkpoint = scratch / "checkpoint.json"
+            command = [sys.executable, str(REPO / "run_agent.py"), "--tasks-dir", str(target),
+                       "--output-file", str(checkpoint), "--deterministic-only", "--budget", str(budget),
+                       "--time-limit", duration]
+            if not use_framework:
+                command.append("--without-framework")
         env = os.environ.copy()
         for key in ("LLM_BASE_URL", "LLM_API_KEY", "OUT", "TASKS"):
             env.pop(key, None)
@@ -143,10 +167,17 @@ def benchmark(source: Path, budget: float = 100000, timeout: float = 300, use_fr
             process = subprocess.run(command, cwd=REPO, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                      timeout=timeout, text=True, encoding="utf-8", errors="replace")
             exit_code, stderr = process.returncode, process.stderr[-12000:]
-        except subprocess.TimeoutExpired as exc:
+        except subprocess.TimeoutExpired:
             timed_out = True
             exit_code = None
             stderr = "Benchmark harness timeout; grading already persisted answers."
+            if container_name:
+                # Killing the Docker CLI alone does not stop its container.
+                try:
+                    subprocess.run(["docker", "rm", "-f", container_name],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
         elapsed = time.monotonic() - started
         rows = []
         for task_id, label in sorted(labels.items()):
@@ -173,11 +204,16 @@ def benchmark(source: Path, budget: float = 100000, timeout: float = 300, use_fr
             per_type[kind] = {"total": len(group), "solvable": sum(row["solvable"] for row in group),
                               "correct": sum(row["correct"] for row in group),
                               "wrong_submissions": sum(row["submitted"] and not row["correct"] for row in group)}
-        return {"schema": 1, "evaluated_at_utc": datetime.now(timezone.utc).isoformat(),
-                "mode": "deterministic-only, actual entrypoint, " + ("openJiuwen" if use_framework else "without-framework"),
+        mode = (f"deterministic-only, Docker image {container_image}, openJiuwen" if container_image else
+                "deterministic-only, actual entrypoint, " + ("openJiuwen" if use_framework else "without-framework"))
+        report = {"schema": 1, "evaluated_at_utc": datetime.now(timezone.utc).isoformat(),
+                "mode": mode,
                 "label_isolation": "Oracle and evaluation fields were removed from all harness task inputs.",
                 "provenance": provenance, "summary": summary, "per_type": per_type,
                 "harness_stderr": stderr, "tasks": rows}
+        if container_image:
+            report["container_image"] = container_image
+        return report
 
 
 def main(argv=None) -> int:
@@ -190,6 +226,7 @@ def main(argv=None) -> int:
     parser.add_argument("--budget", type=float, default=100000)
     parser.add_argument("--timeout", type=float, default=300)
     parser.add_argument("--with-framework", action="store_true")
+    parser.add_argument("--docker-image", help="Run a built image with judge restrictions and independently grade answers")
     args = parser.parse_args(argv)
     if args.synthetic == bool(args.tasks_dir):
         parser.error("Specify exactly one of --tasks-dir or --synthetic")
@@ -199,9 +236,9 @@ def main(argv=None) -> int:
         with tempfile.TemporaryDirectory(prefix="jiuwen-synthetic-") as temp_name:
             dataset = Path(temp_name) / "dataset"
             generate(dataset, args.count, args.seed)
-            report = benchmark(dataset, args.budget, args.timeout, args.with_framework)
+            report = benchmark(dataset, args.budget, args.timeout, args.with_framework, args.docker_image)
     else:
-        report = benchmark(args.tasks_dir, args.budget, args.timeout, args.with_framework)
+        report = benchmark(args.tasks_dir, args.budget, args.timeout, args.with_framework, args.docker_image)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report["summary"], ensure_ascii=False, indent=2))
